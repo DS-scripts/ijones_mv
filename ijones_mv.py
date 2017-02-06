@@ -3,11 +3,11 @@ import os
 import sys
 import shutil
 import subprocess
-import time
 import logging
 import smtplib
+import re
 
-import ijones_config as config
+import rtorrent_config as config
 
 if config.logfile != None:
     logging.basicConfig(filename=config.logfile,format='%(asctime)s %(message)s',level=logging.DEBUG)
@@ -17,12 +17,14 @@ else:
 
 ##### EXTENSIONS #####
 logging.debug("defining extensions")
-video_extensizons = config.video_extensions
+video_extensions = config.video_extensions
 compressed_extensions = config.compressed_extensions
 
 ##### FINAL DIR #####
 logging.debug("Defining dirs")
 final_stop = config.final_stop
+tvshow_stop = config.tvshow_stop
+videos_stop = config.videos_stop
 
 ##### MAIL #####
 logging.debug("Defining mail information")
@@ -35,7 +37,7 @@ to          = config.to
 usetls      = config.usetls
 
 def move(src,dst,opts=None,step2=False):
-    logging.debug("Entering move()")
+    logging.debug("Entering move(src=%s,dst=%s,opts=%s,step2=%s)" % (src,dst,opts,step2))
     logging.debug("src: %s" % src)
     logging.debug("dst: %s" % dst)
     if opts == None: opts = ""
@@ -43,10 +45,15 @@ def move(src,dst,opts=None,step2=False):
     logging.debug("opts: %s" % opts)
     logging.debug("pwd: %s" % os.getcwd())
     logging.debug("listdir: %s" % os.listdir("."))
+    step2_dst = dst
+    if not step2:
+        dst = get_real_dst(src,dst)
+    logging.debug('moving from ' + src + ' to ' + dst)
     rc = subprocess.Popen(["mv"] + opts + [src,dst] ).wait()
-    logging.debug("rc: %s " % rc)
+    logging.debug("moving rc: %s " % rc)
     if step2:
         logging.debug("spawing next process")
+        dst = step2_dst
         if rc == 0:
             if src[-1] == '/':
                 src = src[:-1]
@@ -54,10 +61,67 @@ def move(src,dst,opts=None,step2=False):
 #            subprocess.Popen(["nohup",sys.argv[0],"step2",os.path.join(dst,os.path.basename(src))],stdout=open("/dev/null","w"),stderr=open("/dev/null","w"))
         sys.exit(rc)
 
+def movie(src,dst):
+    true_dst =  os.path.join(videos_stop,src)
+    logging.debug("true_dst: %s" % true_dst)
+    os.makedirs(true_dst)
+    return true_dst
+
+def get_tv_show_name(src):
+    aux = re.search(".*/(\S+)\.(s\d+)e\d+",src,re.I)
+    if aux:
+        aux,season = aux.groups()
+        aux = aux.replace("./","")
+        aux = aux.replace("."," ")
+        logging.debug("tvshow name = %s" % aux)
+        return aux, season
+
+def tvshow(src,dst):
+    logging.debug("tv show - %s" % src)
+    tv_show_name, tv_season = get_tv_show_name(src)
+    logging.debug("tv_show_name = %s" % tv_show_name)
+    logging.debug("tv_season = %s" % tv_season)
+    tv_show_dir = tvshow_stop
+    logging.debug("tv_show_dir = %s" % tv_show_dir)
+    tv_shows = os.listdir(tv_show_dir)
+    logging.debug("tv_shows = %s" % tv_shows)
+    true_dst = os.path.join(tv_show_dir, tv_show_name, tv_season.upper())
+    ref_size = tv_show_name.split()
+    splits = 0
+    if ref_size > 2:
+        splits = len(ref_size) / 2
+    while splits >= 0:
+        tv_list = []
+        tv_show_aux = tv_show_name.rsplit(None,splits)[0]
+        for tv_show in tv_shows:
+            logging.debug("tv_show = %s" % tv_show)
+            if re.search(tv_show_aux, tv_show.replace(".", " "), re.I):
+                logging.debug("tv_show found: %s " % tv_show)
+                tv_list.append(tv_show)
+                logging.debug("tv_show added to list")
+        if len(tv_list) == 1:
+            true_dst = os.path.join(tv_show_dir, tv_list[0], tv_season.upper())
+            break
+        splits -= 1
+    if not os.path.isdir(true_dst):
+	os.makedirs(true_dst)
+    logging.debug("true_dst: %s" % true_dst)
+    return true_dst
+
+
+def get_real_dst(src,dst):
+    if re.search("s\d+e\d+",src,re.I):
+        logging.debug("tv show - %s" % src)
+        return tvshow(src,dst)
+    logging.debug("movie")
+    return movie(src,dst)
+
 def copy(src,dst,remove=False):
     logging.debug("copying %s %s" % (src,dst))
     ok = False
     try:
+        dst = get_real_dst(src,dst)
+        logging.debug("final dst = %s" % dst)
         shutil.copy(src,dst)
         ok = True
     except:
@@ -81,7 +145,7 @@ def copy(src,dst,remove=False):
             logging.debug("not copied again. %s" % (sys.exc_info(),))
             for i in os.environ:
                 logging.debug("Env: %s: %s" % (i,os.environ[i]))
-
+    subprocess.Popen(['ls', '-s', dst, src])
     return
 
 def match_ext(filelist,extlist):
@@ -112,14 +176,15 @@ def uncompress(path,filepath):
     logging.debug("uncompressing")
     ext = os.path.splitext(filepath)[1]
     fwd,filename = os.path.split(filepath)
-    logging.debug("Decompressing %s on %s")
+    logging.debug("Decompressing %s on %s" % (filename,fwd))
+    logging.debug("pwd: %s" % os.getcwd())
     cmd = ""
     if ext == ".rar":
         logging.debug("rar found")
-        cmd = ["unrar","x","-y",filename]
+        cmd = ["/usr/bin/unrar","x","-y",filename]
     if ext == ".zip":
         logging.debug("zip found")
-        cmd = ["unzip","-o",filename]
+        cmd = ["/usr/bin/unzip","-o",filename]
     if len(cmd) > 0:
         logging.debug("subprocessing cmd: %s " % cmd)
         proc = subprocess.Popen(cmd,cwd=fwd)
@@ -170,7 +235,6 @@ def step2():
             video_done.append(video_file)
         for compressed_file in compressed_files:
             logging.debug("compressed file: %s " % compressed_file)
-            logging.debug("compressed entered")
             logging.debug("uncompress")
             uncompress(path,compressed_file)
             logging.debug("relisting video")
